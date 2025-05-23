@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Система управления датчиками</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+    body { font-family: 'Roboto', Arial, sans-serif; background-color: #f0f2f5; }
+    .header { background-color: #2c3e50; color: white; padding: 1rem; text-align: center; font-weight: 500; }
+    .container { display: grid; grid-template-columns: 1fr 3fr; gap: 20px; padding: 20px; }
+    .sidebar, .chart-container, .status-card, table { background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 20px; }
+    .btn { background: #2c3e50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+    .notification { position: fixed; top: 20px; right: 20px; padding: 15px; border-radius: 5px; color: white; z-index: 1000; }
+    .notification.info { background: #3498db; } .notification.error { background: #e74c3e; }
+    table { 
+        width: 100%; 
+        border-collapse: collapse; /* Убирает двойные границы между ячейками */
+    }
+    th, td { 
+        border: 1px solid #ddd; /* Цвет рамки ячеек */
+        padding: 12px; /* Увеличиваем промежуток между текстом и рамками ячеек */
+        text-align: left; 
+    }
+    th { 
+        background-color: #f2f2f2; /* Цвет фона заголовков */
+    }
+    tr:nth-child(even) { 
+        background-color: #f9f9f9; /* Цвет фона для четных строк */
+    }
+    tr:hover { 
+        background-color: #f1f1f1; /* Цвет фона при наведении */
+    }
+    @media (max-width: 768px) { .container { grid-template-columns: 1fr; } }
+    .status-wrapper {
+        display: flex;
+        gap: 20px;
+        margin-bottom: 20px;
+    }
+    .status-card {
+        flex: 1;
+    }
+</style>
+	</style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<header class="header">
+    <h1>Система мониторинга датчиков</h1>
+</header>
+<div class="container">
+    <aside class="sidebar">
+        <h2>Фильтры</h2>
+        <label for="sensor-select">Датчик:</label>
+        <select id="sensor-select" class="filter-control">
+            <option value="all">Все</option>
+            <option value="temp">Температура</option>
+            <option value="humidity">Влажность</option>
+        </select>
+
+        <div class="server-controls" style="margin-top: 20px;">
+            <h3>Обновление данных</h3>
+            <button class="btn" id="fetchData">Получить данные</button>
+            <div style="margin-top: 10px;">
+                <button class="btn" id="autoRefresh">Автообновление: выкл</button>
+                <label for="refreshSlider">Интервал (сек): <span id="refreshValue">10</span></label>
+                <input type="range" id="refreshSlider" min="1" max="60" value="10">
+            </div>
+        </div>
+    </aside>
+    <main class="main-content">
+        <div class="status-wrapper">
+			<div class="status-card"><h3>Температура</h3><p class="value">---</p><p class="timestamp">Обновлено: <span>---</span></p></div>
+			<div class="status-card"><h3>Влажность</h3><p class="value">---</p><p class="timestamp">Обновлено: <span>---</span></p></div>
+		</div>
+        <div class="chart-container">
+            <canvas id="mainChart"></canvas>
+        </div>
+<div class="data-table">
+    <h2>Последние показания</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Время</th>
+                <th>Значение</th>
+                <th>Статус</th>
+            </tr>
+        </thead>
+        <tbody id="table-body"></tbody>
+    </table>
+</div>
+    </main>
+</div>
+<script>
+let config = {};
+const fetchDataBtn = document.getElementById('fetchData');
+const autoRefreshBtn = document.getElementById('autoRefresh');
+const refreshSlider = document.getElementById('refreshSlider');
+const refreshValue = document.getElementById('refreshValue');
+let autoRefreshInterval = null;
+let isAutoRefreshOn = false;
+let currentSensorId = null;
+let chart = null;
+
+function initChart() {
+    const ctx = document.getElementById('mainChart').getContext('2d');
+    chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Температура (°C)',
+                    data: [],
+                    borderColor: '#e74c3c',
+                    tension: 0.1
+                },
+                {
+                    label: 'Влажность (%)',
+                    data: [],
+                    borderColor: '#3498db',
+                    tension: 0.1
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            animation: {
+                duration: 1000,
+                easing: 'easeInOutQuad'
+            },
+            scales: {
+                y: {
+                    beginAtZero: false
+                }
+            }
+        }
+    });
+}
+document.addEventListener('DOMContentLoaded', initChart);
+
+async function loadConfig() {
+    try {
+        const res = await fetch('config.json');
+        if (!res.ok) throw new Error(`Ошибка конфигурации: ${res.status}`);
+        config = await res.json();
+        currentSensorId = config.sensorIds.temperature;
+    } catch (err) {
+        console.error('Ошибка при загрузке config:', err);
+        showNotification('Не удалось загрузить config.json.', 'error');
+    }
+}
+
+async function fetchSensorData() {
+    if (!config.apiUrl || !config.sensorIds) {
+        showNotification('Нет конфигурации для сервера или ID датчиков', 'error');
+        return;
+    }
+
+    try {
+        // Показываем индикатор загрузки
+        chart.data.labels = ['Загрузка...'];
+        chart.data.datasets[0].data = [];
+        chart.data.datasets[1].data = [];
+        chart.update();
+
+        const [tempRes, humidRes] = await Promise.all([
+            fetch(`${config.apiUrl}/readings/${config.sensorIds.temperature}`),
+            fetch(`${config.apiUrl}/readings/${config.sensorIds.humidity}`)
+        ]);
+
+        if (!tempRes.ok || !humidRes.ok) {
+            throw new Error('Ошибка при получении данных');
+        }
+
+        const tempData = await tempRes.json();
+        const humidData = await humidRes.json();
+
+        // Обновляем график только после получения всех данных
+        updateChart(tempData, humidData);
+        
+    } catch (e) {
+        console.error('Ошибка получения данных:', e);
+        showNotification('Не удалось получить данные от сервера.', 'error');
+        
+        // Очищаем график при ошибке
+        chart.data.labels = ['Нет данных'];
+        chart.data.datasets[0].data = [];
+        chart.data.datasets[1].data = [];
+        chart.update();
+    }
+}
+
+function updateChart(tempData, humidData) {
+    if ((!tempData || tempData.length === 0) && (!humidData || humidData.length === 0)) {
+        chart.data.labels = ['Нет данных'];
+        chart.data.datasets[0].data = [];
+        chart.data.datasets[1].data = [];
+        chart.update();
+        return;
+    }
+
+    // Сортируем данные по id
+    const sortedTemp = [...tempData].sort((a, b) => a.id - b.id);
+    const sortedHumid = [...humidData].sort((a, b) => a.id - b.id);
+
+    // Подготавливаем метки времени
+    const labels = sortedTemp.length > 0
+        ? sortedTemp.map(item => new Date(item.timestamp).toLocaleTimeString('ru-RU', { timeZone: 'UTC' }))
+        : sortedHumid.map(item => new Date(item.timestamp).toLocaleTimeString('ru-RU', { timeZone: 'UTC' }));
+
+    // Обновляем данные графика
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = sortedTemp.map(item => parseFloat(item.value));
+    chart.data.datasets[1].data = sortedHumid.map(item => parseFloat(item.value));
+    
+    // Обновляем график
+    chart.update();
+
+    // Обновляем карточки статуса
+    updateStatusCards(sortedTemp, sortedHumid);
+
+    // Обновляем таблицу данных
+    updateDataTable(sortedTemp, sortedHumid);
+}
+
+function updateStatusCards(tempData, humidData) {
+    const latestTemp = tempData && tempData.length > 0 
+        ? tempData[tempData.length - 1] 
+        : null;
+    const latestHumid = humidData && humidData.length > 0 
+        ? humidData[humidData.length - 1] 
+        : null;
+
+    document.querySelectorAll('.status-card').forEach(card => {
+        const type = card.querySelector('h3').textContent.toLowerCase();
+        if (type.includes('температура') && latestTemp) {
+            card.querySelector('.value').textContent = `${latestTemp.value}°C`;
+            card.querySelector('.timestamp span').textContent = new Date(latestTemp.timestamp).toLocaleTimeString('ru-RU', { timeZone: 'UTC' });
+        } else if (type.includes('влажность') && latestHumid) {
+            card.querySelector('.value').textContent = `${latestHumid.value}%`;
+            card.querySelector('.timestamp span').textContent = new Date(latestHumid.timestamp).toLocaleTimeString('ru-RU', { timeZone: 'UTC' });
+        }
+    });
+}
+
+function updateDataTable(tempData, humidData) {
+    const tableBody = document.getElementById('table-body');
+    tableBody.innerHTML = ''; // Очищаем таблицу перед добавлением новых данных
+
+    // Создаём массив объектов для влажности с метками времени
+    const humidRecords = humidData.map(item => ({
+        time: new Date(item.timestamp),
+        value: item.value,
+        status: item.status || 'OK'
+    }));
+
+    // Проходим по всем данным о температуре и добавляем строки в таблицу
+    // Сортируем температуру по времени в обратном порядке
+    tempData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    tempData.forEach(tempItem => {
+        const tempTime = new Date(tempItem.timestamp);
+        const tempValue = tempItem.value;
+        const tempStatus = tempItem.status || 'OK';
+
+        // Ищем соответствующую влажность с допуском ±4 секунды
+        const humidValue = humidRecords.find(humidItem => 
+            Math.abs(humidItem.time - tempTime) <= 4000
+        );
+
+        const row = document.createElement('tr');
+        if (humidValue) {
+            row.innerHTML = `
+                <td>${tempTime.toLocaleTimeString('ru-RU', { timeZone: 'UTC' })}</td>
+                <td>${tempValue} °C / ${humidValue.value} %</td>
+                <td>${tempStatus} / ${humidValue.status}</td>
+            `;
+        } else {
+            row.innerHTML = `
+                <td>${tempTime.toLocaleTimeString('ru-RU', { timeZone: 'UTC' })}</td>
+                <td>${tempValue} °C / нет данных %</td>
+                <td>${tempStatus} / нет данных</td>
+            `;
+        }
+        tableBody.appendChild(row);
+    });
+
+    // Добавляем записи о влажности, которые отсутствуют в данных о температуре
+    humidRecords.forEach(humidItem => {
+        const humidTime = humidItem.time;
+        if (!tempData.find(tempItem => 
+            Math.abs(new Date(tempItem.timestamp) - humidTime) <= 10000
+        )) {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${humidTime.toLocaleTimeString('ru-RU', { timeZone: 'UTC' })}</td>
+                <td>нет данных °C / ${humidItem.value} %</td>
+                <td>нет данных / ${humidItem.status}</td>
+            `;
+            tableBody.appendChild(row);
+        }
+    });
+}
+
+function toggleAutoRefresh() {
+    isAutoRefreshOn = !isAutoRefreshOn;
+    if (isAutoRefreshOn) {
+        const interval = parseInt(refreshSlider.value) * 1000;
+        autoRefreshInterval = setInterval(fetchSensorData, interval);
+        autoRefreshBtn.textContent = `Автообновление: вкл (${interval/1000} сек)`;
+    } else {
+        clearInterval(autoRefreshInterval);
+        autoRefreshBtn.textContent = 'Автообновление: выкл';
+    }
+}
+
+function showNotification(msg, type='info') {
+    const note = document.createElement('div');
+    note.className = `notification ${type}`;
+    note.textContent = msg;
+    document.body.appendChild(note);
+    setTimeout(() => note.remove(), 3000);
+}
+
+function sendCommand(cmd) {
+    showNotification(`Команда "${cmd}" отправлена`, 'info');
+}
+
+fetchDataBtn.addEventListener('click', fetchSensorData);
+autoRefreshBtn.addEventListener('click', toggleAutoRefresh);
+refreshSlider.addEventListener('input', () => {
+    refreshValue.textContent = refreshSlider.value;
+    if (isAutoRefreshOn) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = setInterval(fetchSensorData, parseInt(refreshSlider.value) * 1000);
+        autoRefreshBtn.textContent = `Автообновление: вкл (${refreshSlider.value} сек)`;
+    }
+});
+
+loadConfig();
+</script>
+</body>
+</html>
